@@ -194,6 +194,13 @@ struct HfTokenizerConfigJsonFormatter {
     /// True if the chat template natively references `reasoning_content`.
     /// When true, skip injection — the template handles it.
     template_handles_reasoning: bool,
+    /// True if the chat template branches on `tool_call.arguments is string`
+    /// (Qwen3, Hermes, etc.). When true, skip pre-parsing the JSON-string
+    /// arguments into an object — the template wants the raw string verbatim.
+    /// Pre-parsing forces the `tojson`-with-object branch and re-emits with
+    /// minijinja's compact separators, which breaks append-only prefix matching
+    /// across multi-step tool-use turns.
+    template_handles_arguments_string: bool,
 }
 
 // /// OpenAI Standard Prompt Formatter
