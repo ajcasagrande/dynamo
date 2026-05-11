@@ -374,7 +374,7 @@ class WorkerFactory:
             )
 
         # Register engine routes
-        self.register_engine_routes(runtime, handler)
+        self.register_engine_routes(runtime, handler, lora_enabled=lora_enabled)
 
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
@@ -592,7 +592,8 @@ class WorkerFactory:
             )
 
         # Register engine routes
-        self.register_engine_routes(runtime, handler)
+        lora_enabled = config.engine_args.enable_lora
+        self.register_engine_routes(runtime, handler, lora_enabled=lora_enabled)
 
         await self._maybe_wait_for_failover_lock(handler, runtime, config)
 
@@ -682,7 +683,7 @@ class WorkerFactory:
         return None
 
     def register_engine_routes(
-        self, runtime: DistributedRuntime, handler: BaseWorkerHandler
+        self, runtime: DistributedRuntime, handler: BaseWorkerHandler, lora_enabled: bool = False
     ) -> None:
         """Register all engine routes for this handler.
 
@@ -720,10 +721,11 @@ class WorkerFactory:
             "init_weights_update_group":       handler.init_weights_update_group,
             "destroy_weights_update_group":    handler.destroy_weights_update_group,
             "get_weight_version":              handler.get_weight_version,
-            # LoRA
-            "load_lora_adapter":           handler.load_lora_adapter,
-            "unload_lora_adapter":         handler.unload_lora_adapter,
         }
+
+        if lora_enabled:
+            rl_routes["load_lora_adapter"] = handler.load_lora_adapter
+            rl_routes["unload_lora_adapter"] = handler.unload_lora_adapter
 
         for name, fn in rl_routes.items():
             handler._rl_routes[name] = fn
@@ -731,6 +733,7 @@ class WorkerFactory:
 
         logger.info(
             "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
-            "start_profile, stop_profile, and RL admin routes: %s",
+            "start_profile, stop_profile, and RL admin routes: %s%s",
             ", ".join(sorted(rl_routes)),
+            " (LoRA routes: load_lora_adapter, unload_lora_adapter)" if lora_enabled else "",
         )
