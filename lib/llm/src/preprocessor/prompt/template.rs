@@ -194,13 +194,21 @@ struct HfTokenizerConfigJsonFormatter {
     /// True if the chat template natively references `reasoning_content`.
     /// When true, skip injection — the template handles it.
     template_handles_reasoning: bool,
-    /// True if the chat template branches on `tool_call.arguments is string`
-    /// (Qwen3, Hermes, etc.). When true, skip pre-parsing the JSON-string
-    /// arguments into an object — the template wants the raw string verbatim.
-    /// Pre-parsing forces the `tojson`-with-object branch and re-emits with
-    /// minijinja's compact separators, which breaks append-only prefix matching
-    /// across multi-step tool-use turns.
-    template_handles_arguments_string: bool,
+    /// True if the `default` template branches on `tool_call.arguments is string`
+    /// (Qwen3, Hermes, etc.). When true and rendering through `default`, skip
+    /// pre-parsing the JSON-string `tool_calls[].function.arguments` into an
+    /// object — the template wants the raw string verbatim. Pre-parsing forces
+    /// the `tojson`-with-object branch and re-emits with minijinja's compact
+    /// separators, which breaks append-only prefix matching across multi-step
+    /// tool-use turns. Tracked separately for `default` and `tool_use` because
+    /// HF configs may register different sources for each, and because
+    /// `arguments is string` is tool_calls-specific — legacy
+    /// `function_call.arguments` lives outside that branch and is still
+    /// normalized unconditionally.
+    default_template_handles_tool_calls_arguments_string: bool,
+    /// True if the `tool_use` template branches on `tool_call.arguments is string`.
+    /// See `default_template_handles_tool_calls_arguments_string` for rationale.
+    tool_use_template_handles_tool_calls_arguments_string: bool,
 }
 
 // /// OpenAI Standard Prompt Formatter
