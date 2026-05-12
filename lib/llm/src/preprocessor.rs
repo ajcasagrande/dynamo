@@ -351,85 +351,85 @@ impl OpenAIPreprocessor {
         let (image_token_counter, image_token_id, chat_placeholder_token_id) =
             match image_token_inputs {
                 Some((model_id, model_type, model_dir)) => {
-                // Try counter init and image-token resolution independently.
-                // Each carries its own reason for failure; the summary log
-                // below names whichever pieces are missing so operators can
-                // tell at a glance whether the model needs a lightseek
-                // upstream PR (registry miss) or a non-standard placeholder
-                // location (resolver miss).
-                let (counter, counter_err): (
-                    Option<lightseek_mm::LightseekMmCounter>,
-                    Option<String>,
-                ) = match lightseek_mm::LightseekMmCounter::try_new(
-                    &model_id,
-                    Some(&model_type),
-                    &model_dir,
-                ) {
-                    Ok(c) => (Some(c), None),
-                    Err(e) => (None, Some(e.to_string())),
-                };
-                let img_tok = lightseek_mm::resolve_image_token_id(&model_id, &model_dir);
+                    // Try counter init and image-token resolution independently.
+                    // Each carries its own reason for failure; the summary log
+                    // below names whichever pieces are missing so operators can
+                    // tell at a glance whether the model needs a lightseek
+                    // upstream PR (registry miss) or a non-standard placeholder
+                    // location (resolver miss).
+                    let (counter, counter_err): (
+                        Option<lightseek_mm::LightseekMmCounter>,
+                        Option<String>,
+                    ) = match lightseek_mm::LightseekMmCounter::try_new(
+                        &model_id,
+                        Some(&model_type),
+                        &model_dir,
+                    ) {
+                        Ok(c) => (Some(c), None),
+                        Err(e) => (None, Some(e.to_string())),
+                    };
+                    let img_tok = lightseek_mm::resolve_image_token_id(&model_id, &model_dir);
 
-                // For families where the chat-template placeholder is
-                // distinct from the expansion-time token (Qwen2-VL,
-                // Qwen2.5-VL: template emits `<|image_pad|>` but vLLM
-                // HF processor expands it to N copies of `<|vision_pad|>`),
-                // `config.json`'s `image_token_id` field holds the
-                // chat-template token. We use it for finding placeholder
-                // positions in the BPE'd prompt; `img_tok` (lightseek's
-                // value) stays as the expansion-time fill token. For
-                // families with a single token covering both roles
-                // (Qwen3-VL, LLaVA, etc.) the two values coincide and
-                // routing behaves exactly as before.
-                let chat_placeholder_tok =
-                    read_image_token_id_from_config(&model_dir).or(img_tok);
+                    // For families where the chat-template placeholder is
+                    // distinct from the expansion-time token (Qwen2-VL,
+                    // Qwen2.5-VL: template emits `<|image_pad|>` but vLLM
+                    // HF processor expands it to N copies of `<|vision_pad|>`),
+                    // `config.json`'s `image_token_id` field holds the
+                    // chat-template token. We use it for finding placeholder
+                    // positions in the BPE'd prompt; `img_tok` (lightseek's
+                    // value) stays as the expansion-time fill token. For
+                    // families with a single token covering both roles
+                    // (Qwen3-VL, LLaVA, etc.) the two values coincide and
+                    // routing behaves exactly as before.
+                    let chat_placeholder_tok =
+                        read_image_token_id_from_config(&model_dir).or(img_tok);
 
-                match (counter.is_some(), img_tok.is_some()) {
-                    (true, true) => tracing::info!(
-                        target: "mm_routing",
-                        model = %model_id,
-                        model_dir = %model_dir.display(),
-                        "MM-aware KV routing enabled (lightseek)"
-                    ),
-                    (counter_ok, img_ok) => {
-                        let mut reasons: Vec<String> = Vec::new();
-                        if !counter_ok {
-                            reasons.push(format!(
-                                "model not supported by the lightseek registry ({})",
-                                counter_err.as_deref().unwrap_or("unknown error")
-                            ));
-                        }
-                        if !img_ok {
-                            reasons.push(
-                                "image-placeholder token unresolvable from \
-                                 config.json / processor_config.json / \
-                                 tokenizer_config.json / vocab probe"
-                                    .to_string(),
-                            );
-                        }
-                        tracing::warn!(
+                    match (counter.is_some(), img_tok.is_some()) {
+                        (true, true) => tracing::info!(
                             target: "mm_routing",
                             model = %model_id,
-                            reasons = %reasons.join("; "),
-                            "{} is not supported for MM-aware KV routing ({}). \
-                             Falling back to KV routing without MM awareness — \
-                             text-prefix overlap still works but the router \
-                             cannot distinguish requests by image content.",
-                            model_id,
-                            reasons.join("; ")
-                        );
+                            model_dir = %model_dir.display(),
+                            "MM-aware KV routing enabled (lightseek)"
+                        ),
+                        (counter_ok, img_ok) => {
+                            let mut reasons: Vec<String> = Vec::new();
+                            if !counter_ok {
+                                reasons.push(format!(
+                                    "model not supported by the lightseek registry ({})",
+                                    counter_err.as_deref().unwrap_or("unknown error")
+                                ));
+                            }
+                            if !img_ok {
+                                reasons.push(
+                                    "image-placeholder token unresolvable from \
+                                 config.json / processor_config.json / \
+                                 tokenizer_config.json / vocab probe"
+                                        .to_string(),
+                                );
+                            }
+                            tracing::warn!(
+                                target: "mm_routing",
+                                model = %model_id,
+                                reasons = %reasons.join("; "),
+                                "{} is not supported for MM-aware KV routing ({}). \
+                                 Falling back to KV routing without MM awareness — \
+                                 text-prefix overlap still works but the router \
+                                 cannot distinguish requests by image content.",
+                                model_id,
+                                reasons.join("; ")
+                            );
+                        }
                     }
+                    (counter, img_tok, chat_placeholder_tok)
                 }
-                (counter, img_tok, chat_placeholder_tok)
-            }
-            None => {
-                tracing::debug!(
-                    target: "mm_routing",
-                    "model directory not derivable from MDC; MM-aware routing disabled"
-                );
-                (None, None, None)
-            }
-        };
+                None => {
+                    tracing::debug!(
+                        target: "mm_routing",
+                        "model directory not derivable from MDC; MM-aware routing disabled"
+                    );
+                    (None, None, None)
+                }
+            };
 
         #[cfg(feature = "lightseek-mm")]
         let image_placeholder_template = formatter.image_placeholder_template();
@@ -1146,8 +1146,7 @@ impl OpenAIPreprocessor {
                     Some(rewritten) => match self.tokenizer.encode(&rewritten) {
                         Ok(enc) => {
                             let new_ids = enc.token_ids().to_vec();
-                            let new_count =
-                                new_ids.iter().filter(|&&t| t == find_token_id).count();
+                            let new_count = new_ids.iter().filter(|&&t| t == find_token_id).count();
                             if new_count != mm_image_entries.len() {
                                 tracing::warn!(
                                     target: "mm_routing",
