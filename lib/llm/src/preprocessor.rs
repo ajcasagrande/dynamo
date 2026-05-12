@@ -170,6 +170,39 @@ fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
     cf.path()?.parent().map(std::path::PathBuf::from)
 }
 
+/// Read the top-level `image_token_id` field from `config.json` in
+/// `model_dir`. Used as the chat-template placeholder token id for
+/// families where the chat-template-emitted placeholder differs from
+/// the expansion-time pad token (Qwen2-VL, Qwen2.5-VL: config has both
+/// `image_token_id` for the template and `vision_token_id` for the
+/// per-patch expansion).
+///
+/// Returns `None` when the file is missing/unparseable or the field is
+/// absent — caller falls back to lightseek's `image_token_id` value,
+/// preserving the single-token behavior for all other families
+/// (Qwen3-VL, LLaVA, Phi-3 after substitution, etc.).
+///
+/// TODO(mm-routing): this duplicates a config field that lightseek-mm
+/// already parses. The cleaner long-term fix is to extend
+/// `lightseek_mm::ModelProcessorSpec` with a
+/// `chat_template_placeholder_id()` method that returns the
+/// chat-template-emitted token (defaulting to `placeholder_token_id()`
+/// for single-token families, overridden to `image_token_id` for
+/// Qwen2-VL / Qwen2.5-VL). Once that lands upstream we can delete this
+/// helper and the `chat_placeholder_token_id` resolution branch and
+/// just call the new spec method.
+#[cfg(feature = "lightseek-mm")]
+fn read_image_token_id_from_config(
+    model_dir: &std::path::Path,
+) -> Option<crate::protocols::TokenIdType> {
+    let config_path = model_dir.join("config.json");
+    let raw = std::fs::read_to_string(&config_path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("image_token_id")
+        .and_then(|x| x.as_u64())
+        .and_then(|id| u32::try_from(id).ok())
+}
+
 /// Shared SSRF-aware `MediaFetcher` + `reqwest::Client` for the dim-fetch
 /// path used by MM-aware routing. Inherits the same policy contract as the
 /// frontend-decode path (`MediaLoader`): blocklist DNS resolver, redirect
@@ -241,6 +274,29 @@ pub struct OpenAIPreprocessor {
     /// fast path that doesn't need this field.
     #[cfg(feature = "lightseek-mm")]
     image_token_text: Option<String>,
+    /// Token id that appears in the BPE-tokenized prompt at each image
+    /// position — the token that the chat template emits per image.
+    ///
+    /// For most VLM families this equals `image_token_id`: the chat
+    /// template emits the same token that vLLM's HF processor later
+    /// expands to N copies of (Qwen3-VL's `<|image_pad|>`, LLaVA's
+    /// `<image>`, Phi-3-vision's `<|image|>` after our routing-side
+    /// substitution, etc.).
+    ///
+    /// Qwen2-VL and Qwen2.5-VL split the two: the chat template renders
+    /// `<|image_pad|>` (id 151655) once per image, but vLLM's HF
+    /// processor *expands* it to N copies of `<|vision_pad|>` (id
+    /// 151654) — one per visual patch. Lightseek-mm's
+    /// `placeholder_token_id()` returns the expansion-time token
+    /// (`<|vision_pad|>`) because that's what appears in the worker's
+    /// final token sequence and what vLLM publishes KV events for.
+    /// To find positions in the *routing-side* tokenized prompt, we need
+    /// the chat-template token (`<|image_pad|>`) instead. Resolved at
+    /// init by reading `config.json`'s `image_token_id` field when
+    /// present; falls back to lightseek's `image_token_id` for models
+    /// whose config doesn't expose a separate placeholder token.
+    #[cfg(feature = "lightseek-mm")]
+    chat_placeholder_token_id: Option<crate::protocols::TokenIdType>,
 }
 
 impl OpenAIPreprocessor {
@@ -292,8 +348,9 @@ impl OpenAIPreprocessor {
         let context_length = mdc.context_length;
 
         #[cfg(feature = "lightseek-mm")]
-        let (image_token_counter, image_token_id) = match image_token_inputs {
-            Some((model_id, model_type, model_dir)) => {
+        let (image_token_counter, image_token_id, chat_placeholder_token_id) =
+            match image_token_inputs {
+                Some((model_id, model_type, model_dir)) => {
                 // Try counter init and image-token resolution independently.
                 // Each carries its own reason for failure; the summary log
                 // below names whichever pieces are missing so operators can
@@ -312,6 +369,20 @@ impl OpenAIPreprocessor {
                     Err(e) => (None, Some(e.to_string())),
                 };
                 let img_tok = lightseek_mm::resolve_image_token_id(&model_id, &model_dir);
+
+                // For families where the chat-template placeholder is
+                // distinct from the expansion-time token (Qwen2-VL,
+                // Qwen2.5-VL: template emits `<|image_pad|>` but vLLM
+                // HF processor expands it to N copies of `<|vision_pad|>`),
+                // `config.json`'s `image_token_id` field holds the
+                // chat-template token. We use it for finding placeholder
+                // positions in the BPE'd prompt; `img_tok` (lightseek's
+                // value) stays as the expansion-time fill token. For
+                // families with a single token covering both roles
+                // (Qwen3-VL, LLaVA, etc.) the two values coincide and
+                // routing behaves exactly as before.
+                let chat_placeholder_tok =
+                    read_image_token_id_from_config(&model_dir).or(img_tok);
 
                 match (counter.is_some(), img_tok.is_some()) {
                     (true, true) => tracing::info!(
@@ -349,14 +420,14 @@ impl OpenAIPreprocessor {
                         );
                     }
                 }
-                (counter, img_tok)
+                (counter, img_tok, chat_placeholder_tok)
             }
             None => {
                 tracing::debug!(
                     target: "mm_routing",
                     "model directory not derivable from MDC; MM-aware routing disabled"
                 );
-                (None, None)
+                (None, None, None)
             }
         };
 
@@ -446,6 +517,8 @@ impl OpenAIPreprocessor {
             image_placeholder_template,
             #[cfg(feature = "lightseek-mm")]
             image_token_text,
+            #[cfg(feature = "lightseek-mm")]
+            chat_placeholder_token_id,
         }))
     }
     /// Encode a string to it's tokens
@@ -1011,6 +1084,13 @@ impl OpenAIPreprocessor {
             );
             return Ok(());
         };
+        // The token id that the chat-template-rendered prompt actually
+        // contains at each image position. For most VLM families this is
+        // `image_token_id`; for Qwen2-VL / Qwen2.5-VL the chat template
+        // emits `<|image_pad|>` while lightseek's `image_token_id` is
+        // `<|vision_pad|>` (the per-patch expansion token). See the
+        // `chat_placeholder_token_id` field doc for full context.
+        let find_token_id = self.chat_placeholder_token_id.unwrap_or(image_token_id);
         let Some(counter) = self.image_token_counter.as_ref() else {
             tracing::debug!(
                 target: "mm_routing",
@@ -1048,7 +1128,7 @@ impl OpenAIPreprocessor {
         // re-tokenize the routing-side view. The worker-bound `token_ids`
         // stays untouched — only the routing path's view of the prompt
         // is rewritten.
-        let placeholder_count = token_ids.iter().filter(|&&t| t == image_token_id).count();
+        let placeholder_count = token_ids.iter().filter(|&&t| t == find_token_id).count();
         let normalized_token_ids: std::borrow::Cow<'_, [crate::protocols::TokenIdType]> =
             if placeholder_count == mm_image_entries.len() {
                 std::borrow::Cow::Borrowed(token_ids)
@@ -1067,7 +1147,7 @@ impl OpenAIPreprocessor {
                         Ok(enc) => {
                             let new_ids = enc.token_ids().to_vec();
                             let new_count =
-                                new_ids.iter().filter(|&&t| t == image_token_id).count();
+                                new_ids.iter().filter(|&&t| t == find_token_id).count();
                             if new_count != mm_image_entries.len() {
                                 tracing::warn!(
                                     target: "mm_routing",
@@ -1125,12 +1205,20 @@ impl OpenAIPreprocessor {
             .collect();
         let n_total: usize = n_tokens.iter().sum();
 
+        // Find each placeholder occurrence in the routing-side token
+        // sequence by `find_token_id` (the chat-template token); replace
+        // it with N copies of `image_token_id` (the expansion-time pad
+        // token that vLLM's HF processor produces on the worker side
+        // and that vLLM uses to compute KV-event block hashes). For
+        // families where the two coincide (most VLMs) this is a no-op
+        // semantic change; for Qwen2-VL / Qwen2.5-VL this is what bridges
+        // the chat-template token and the worker's per-patch expansion.
         let mut expanded: Vec<crate::protocols::TokenIdType> =
             Vec::with_capacity(normalized_token_ids.len() + n_total);
         let mut img_ranges: Vec<(usize, usize)> = Vec::with_capacity(mm_image_entries.len());
         let mut i = 0usize;
         for &t in normalized_token_ids.iter() {
-            if t == image_token_id && i < mm_image_entries.len() {
+            if t == find_token_id && i < mm_image_entries.len() {
                 let start = expanded.len();
                 expanded.extend(std::iter::repeat_n(image_token_id, n_tokens[i]));
                 img_ranges.push((start, start + n_tokens[i]));
