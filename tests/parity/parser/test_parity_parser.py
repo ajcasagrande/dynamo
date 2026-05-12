@@ -230,10 +230,8 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     # still drop on the missing end-token diverge here.
     # vllm/sglang qwen3_coder.batch.5 both recover to the same call as
     # Dynamo and match the new expected — intentionally NOT registered.
-    ("vllm", "glm47", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("vllm", "minimax_m2", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("vllm", "deepseek_v3_1", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    ("sglang", "glm47", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("sglang", "minimax_m2", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("sglang", "deepseek_v3_1", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("sglang", "harmony", "PARSER.batch.5"): _RECOVERY_CONTRACT,

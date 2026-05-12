@@ -60,16 +60,13 @@ cases:
         arguments: {}
       normal_text: ''
   PARSER.batch.5:
-    description: Missing </tool_call> end marker
+    description: Missing </tool_call> end marker — drop to match upstream vLLM/SGLang
     model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      calls: []
+      normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
   PARSER.batch.6:
     description: Empty args (no-arg call)
     model_text: <tool_call>get_time</tool_call>
