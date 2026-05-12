@@ -157,9 +157,9 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "minimax_m2",
         "PARSER.batch.8.d",
     ): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
-    ("vllm", "gemma4", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "gemma4", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "gemma4", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
+    # gemma4 batch.8.{b,c,d} aligned with V+spec on 2026-05-11 — Dynamo's
+    #   gemma4 parser now drops trailing text after wrapper end (was a
+    #   Dynamo-only divergence).
     # vLLM's pythonic parser rejects the whole input when the bracket-call form
     # is surrounded by interleaved text — calls=[], normal_text=raw input.
     # Dynamo's pythonic parser extracts the call and surfaces the surrounding
@@ -274,7 +274,7 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "PARSER.batch.2.b",
     ): "vLLM deepseek_v4 does not restart parsing on a second back-to-back fence pair",
     ("vllm", "deepseek_v4", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "gemma4", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
+    # gemma4 batch.2.c aligned with V+spec on 2026-05-11 — see note above.
     ("vllm", "glm47", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
     ("vllm", "hermes", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
     ("vllm", "jamba", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,

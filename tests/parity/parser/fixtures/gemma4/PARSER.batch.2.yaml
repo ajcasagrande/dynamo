@@ -48,11 +48,9 @@ cases:
       - name: get_time
         arguments:
           timezone: EST
-      normal_text: 'Both:  Done.'
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_time', 'arguments': {'timezone': 'EST'}}]
-    #   normal_text: 'Both:'
+      normal_text: 'Both:'
+    # aligned with V+spec on 2026-05-11 — was a Dynamo-only divergence;
+    #   gemma4 parser updated to drop trailing text after wrapper end.
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
