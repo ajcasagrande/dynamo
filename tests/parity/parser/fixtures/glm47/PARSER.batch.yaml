@@ -67,6 +67,83 @@ cases:
     expected:
       calls: []
       normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
+  # =====================================================================
+  # PARSER.batch.5 sub-cases — multi-call truncation.
+  #
+  # The bare `PARSER.batch.5` above pins the single-call shape (only </tool_call>
+  # missing); 5.d and 5.e add the multi-call shapes where one prior call already
+  # closed cleanly and the LAST call is the truncated one. These exercise the
+  # cursor-loop iteration that "drop missing-end-token" applies to non-leading
+  # blocks, not just lone calls.
+  #
+  # 5.e directly reproduces the GLM-5.1 prod leak shape reported by Ajay Rajan
+  # in #nv-inference Slack (2026-05-11). Curl request:
+  #
+  #   curl -s "https://inference-api.nvidia.com/v1/chat/completions" \
+  #     -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  #     -d '{"model":"nvidia/zai-org/glm-5.1","messages":[
+  #       {"role":"system","content":"You are a helpful assistant. Use tools when appropriate. You must use the provided tools to answer questions."},
+  #       {"role":"user","content":"Search for the weather in Boston and New York, then send the forecast to admin@example.com"}],
+  #       "tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather for a location",
+  #         "parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}},
+  #         {"type":"function","function":{"name":"send_email","description":"Send an email",
+  #         "parameters":{"type":"object","properties":{"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["to","subject","body"]}}}],
+  #       "max_tokens":512,"stream":false}'
+  #
+  # Pre-fix response (the leak):
+  #   {"finish_reason":"tool_calls","index":0,"message":{
+  #     "content":"I'll start by fetching the weather for both Boston and New York at the same time!get_weatherlocationNew York",
+  #     "role":"assistant",
+  #     "tool_calls":[{"function":{"arguments":"{\"location\":\"Boston\"}","name":"get_weather"},
+  #                    "id":"0b19bf30-aefa-4273-a33d-4b69fd82ba46","type":"function"}]}}
+  #
+  # The "get_weatherlocationNew York" tail is the second tool_call's XML markup
+  # after downstream tag-stripping. With the drop-to-match-upstream behavior pinned
+  # by this PR, the parser surfaces the raw 2nd block in normal_text — the parser
+  # contract is "match upstream"; downstream cleanup of the leak is a separate item.
+  #
+  # SPEC STATUS — there isn't one. The cited GLM-4.7 chat template
+  # https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja defines
+  # only well-formed forward serialization; it does not specify a recovery
+  # contract for truncated input. The pinned `expected:` blocks are Dynamo's
+  # deliberate choice (match vLLM/SGLang on the call side); divergences against
+  # vLLM/SGLang (where they exist) are captured in test_parity_parser.py's
+  # KNOWN_DIVERGENCES table rather than treated as bugs.
+  # =====================================================================
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only </tool_call> end marker (body complete). Shallow-truncation flavor of Ajay's GLM-5.1 prod repro.
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: Boston
+      normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value>
+    # Verified 2026-05-12 against Prashanth's current #9355 HEAD (5470b98de4e):
+    #   dynamo: calls=[Boston], normal_text="I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value>"
+    #   vllm:   calls=[Boston], normal_text="I'll start by fetching the weather for both Boston and New York at the same time!"   (drops raw 2nd block too)
+    #   sglang: calls=[Boston], normal_text="I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value>"   (matches Dynamo)
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value. Direct shape of Ajay's GLM-5.1 prod leak.
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: Boston
+      normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York
+    # Verified 2026-05-12 against Prashanth's current #9355 HEAD (5470b98de4e):
+    #   dynamo: calls=[Boston], normal_text="I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York"
+    #   vllm:   calls=[Boston], normal_text="I'll start by fetching the weather for both Boston and New York at the same time!"   (drops raw 2nd block too)
+    #   sglang: calls=[Boston], normal_text="I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York"   (matches Dynamo bit-for-bit)
+    # In Ajay's prod response the downstream chat-pipeline tag-stripper turns the
+    # raw 2nd block in normal_text into `get_weatherlocationNew York` in
+    # message.content. The parser-level fix (drop the call, preserve raw) matches
+    # SGLang; vLLM additionally drops the raw, which is the only cross-impl gap left.
   PARSER.batch.6:
     description: Empty args (no-arg call)
     model_text: <tool_call>get_time</tool_call>
