@@ -67,6 +67,12 @@ cases:
     expected:
       calls: []
       normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
+    # Verified 2026-05-12 against this PR HEAD (5470b98de4e) via
+    # tests/parity/parser/{dynamo,vllm,sglang}.parse:
+    #   dynamo: calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>"
+    #   vllm:   calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>"
+    #   sglang: calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>"
+    # All three impls converge — no KNOWN_DIVERGENCES entries needed for the bare 5 case.
   # =====================================================================
   # PARSER.batch.5 sub-cases — multi-call truncation.
   #
