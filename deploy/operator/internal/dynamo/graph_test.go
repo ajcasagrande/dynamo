@@ -9178,18 +9178,39 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 		envMap := envVarsToMap(podSpec.Containers[0].Env)
 		assert.Equal(t, "true", envMap[commonconsts.EnvTopologyEnabled],
 			"worker should have DYN_TOPOLOGY_ENABLED=true")
-		// DYN_TOPOLOGY_ZONE is a Downward API env — it won't have a Value but
-		// should be present with a ValueFrom.fieldRef
-		found := false
-		for _, env := range podSpec.Containers[0].Env {
-			if env.Name == "DYN_TOPOLOGY_ZONE" {
-				found = true
-				require.NotNil(t, env.ValueFrom, "DYN_TOPOLOGY_ZONE should use ValueFrom")
-				require.NotNil(t, env.ValueFrom.FieldRef, "DYN_TOPOLOGY_ZONE should use fieldRef")
-				assert.Equal(t, "metadata.labels['topology.kubernetes.io/zone']", env.ValueFrom.FieldRef.FieldPath)
+		assert.Equal(t, "/etc/dynamo/topology", envMap[commonconsts.EnvTopologyPrefix+"MOUNT_PATH"])
+		assert.Equal(t, "zone", envMap[commonconsts.EnvTopologyPrefix+"DOMAIN"])
+
+		// Downward API volume should project the label into a file
+		foundVol := false
+		for _, v := range podSpec.Volumes {
+			if v.Name == "topology-labels" {
+				foundVol = true
+				require.NotNil(t, v.DownwardAPI)
+				require.Len(t, v.DownwardAPI.Items, 1)
+				assert.Equal(t, "zone", v.DownwardAPI.Items[0].Path)
+				assert.Equal(t, "metadata.labels['topology.kubernetes.io/zone']", v.DownwardAPI.Items[0].FieldRef.FieldPath)
 			}
 		}
-		assert.True(t, found, "DYN_TOPOLOGY_ZONE should be present on worker")
+		assert.True(t, foundVol, "topology-labels volume should be present")
+
+		// Main container should have the volume mount
+		foundMount := false
+		for _, m := range podSpec.Containers[0].VolumeMounts {
+			if m.Name == "topology-labels" {
+				foundMount = true
+				assert.Equal(t, "/etc/dynamo/topology", m.MountPath)
+				assert.True(t, m.ReadOnly)
+			}
+		}
+		assert.True(t, foundMount, "topology-labels volume mount should be on main container")
+
+		// Init container should be injected to copy node label to pod
+		require.NotEmpty(t, podSpec.InitContainers, "worker should have init container for topology label copy")
+		initContainer := podSpec.InitContainers[len(podSpec.InitContainers)-1]
+		assert.Equal(t, "copy-topology-label", initContainer.Name)
+		assert.Contains(t, initContainer.Command[2], "topology.kubernetes.io/zone",
+			"init container script should reference the labelKey")
 	})
 
 	t.Run("prefill worker gets topology env vars", func(t *testing.T) {
@@ -9215,14 +9236,7 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 
 		envMap := envVarsToMap(podSpec.Containers[0].Env)
 		assert.Equal(t, "true", envMap[commonconsts.EnvTopologyEnabled])
-		found := false
-		for _, env := range podSpec.Containers[0].Env {
-			if env.Name == "DYN_TOPOLOGY_RACK" {
-				found = true
-				assert.Equal(t, "metadata.labels['nvidia.com/rack']", env.ValueFrom.FieldRef.FieldPath)
-			}
-		}
-		assert.True(t, found, "DYN_TOPOLOGY_RACK should be present on prefill worker")
+		assert.Equal(t, "rack", envMap[commonconsts.EnvTopologyPrefix+"DOMAIN"])
 	})
 
 	t.Run("decode worker gets topology env vars", func(t *testing.T) {
@@ -9282,6 +9296,12 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 		// But frontend SHOULD have router env vars
 		assert.Equal(t, "zone", envMap[commonconsts.EnvRouterKvTransferDomain])
 		assert.Equal(t, "fail", envMap[commonconsts.EnvRouterKvTransferNoMatchPolicy])
+
+		// Frontend should NOT have the topology label copy init container
+		for _, ic := range podSpec.InitContainers {
+			assert.NotEqual(t, "copy-topology-label", ic.Name,
+				"frontend should NOT have topology label copy init container")
+		}
 	})
 
 	t.Run("worker without kvTransferPolicy has no topology env vars", func(t *testing.T) {

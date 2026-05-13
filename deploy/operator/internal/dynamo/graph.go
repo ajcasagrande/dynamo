@@ -1763,12 +1763,25 @@ func applyDGDTemplateDefaults(
 		case component.ComponentType == commonconsts.ComponentTypeFrontend:
 			main.Env = MergeEnvs(KvTransferPolicyEnvVars(dynamoDeployment.Spec.KvTransferPolicy), main.Env)
 		case IsWorkerComponent(string(component.ComponentType)):
-			main.Env = MergeEnvs(WorkerTopologyEnvVars(dynamoDeployment.Spec.KvTransferPolicy), main.Env)
+			kvt := dynamoDeployment.Spec.KvTransferPolicy
+			main.Env = MergeEnvs(WorkerTopologyEnvVars(kvt), main.Env)
+			main.VolumeMounts = append(main.VolumeMounts, TopologyLabelVolumeMount())
+			podTemplate.Spec.Volumes = appendVolumeIfAbsent(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt))
+			podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers, TopologyLabelCopyInitContainer(kvt))
 		}
 	}
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
+}
+
+func appendVolumeIfAbsent(volumes []corev1.Volume, vol corev1.Volume) []corev1.Volume {
+	for _, v := range volumes {
+		if v.Name == vol.Name {
+			return volumes
+		}
+	}
+	return append(volumes, vol)
 }
 
 // dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated

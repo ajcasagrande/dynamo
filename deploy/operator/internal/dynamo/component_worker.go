@@ -127,25 +127,109 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 	return container, nil
 }
 
-// WorkerTopologyEnvVars returns DYN_TOPOLOGY_ENABLED=true and a
-// DYN_TOPOLOGY_{DOMAIN} env var that reads the pod label via Downward API.
-func WorkerTopologyEnvVars(policy *v1beta1.KvTransferPolicy) []corev1.EnvVar {
-	domain := string(policy.Domain)
-	envName := commonconsts.EnvTopologyPrefix + strings.ToUpper(domain)
-	labelFieldPath := fmt.Sprintf("metadata.labels['%s']", policy.LabelKey)
+const (
+	topologyVolumeName = "topology-labels"
+	topologyMountPath  = "/etc/dynamo/topology"
+)
 
+// TopologyLabelCopyInitContainer returns an init container that reads a node
+// label via the K8s API and patches it onto the pod. The Downward API volume
+// then projects the label value into a file the runtime reads.
+func TopologyLabelCopyInitContainer(policy *v1beta1.KvTransferPolicy) corev1.Container {
+	labelKey := policy.LabelKey
+
+	script := fmt.Sprintf(`set -e
+APISERVER=https://kubernetes.default.svc
+TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+AUTH="Authorization: Bearer $TOKEN"
+
+LABEL_KEY="%s"
+NODE_JSON=$(curl -fsSL --cacert $CACERT -H "$AUTH" "$APISERVER/api/v1/nodes/$NODE_NAME")
+LABEL_VALUE=$(echo "$NODE_JSON" | sed -n "s|.*\"${LABEL_KEY}\": *\"\([^\"]*\)\".*|\1|p")
+
+if [ -z "$LABEL_VALUE" ]; then
+  echo "ERROR: node label '$LABEL_KEY' not found on node $NODE_NAME" >&2
+  exit 1
+fi
+
+NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+PATCH="{\"metadata\":{\"labels\":{\"${LABEL_KEY}\":\"${LABEL_VALUE}\"}}}"
+curl -fsSL --cacert $CACERT -H "$AUTH" -H "Content-Type: application/strategic-merge-patch+json" \
+  -X PATCH -d "$PATCH" "$APISERVER/api/v1/namespaces/$NAMESPACE/pods/$POD_NAME" > /dev/null
+
+echo "Copied node label $LABEL_KEY=$LABEL_VALUE to pod $POD_NAME"
+`, labelKey)
+
+	return corev1.Container{
+		Name:    "copy-topology-label",
+		Image:   "bitnami/kubectl:latest",
+		Command: []string{"sh", "-c", script},
+		Env: []corev1.EnvVar{
+			{
+				Name: "POD_NAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+				},
+			},
+			{
+				Name: "NODE_NAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
+				},
+			},
+		},
+	}
+}
+
+// TopologyLabelVolume returns a Downward API volume that projects the pod
+// label (copied from the node by the init container) into a file. Unlike
+// env var fieldRefs, volumes reflect live label updates.
+func TopologyLabelVolume(policy *v1beta1.KvTransferPolicy) corev1.Volume {
+	domain := strings.ToLower(string(policy.Domain))
+	return corev1.Volume{
+		Name: topologyVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items: []corev1.DownwardAPIVolumeFile{
+					{
+						Path: domain,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: fmt.Sprintf("metadata.labels['%s']", policy.LabelKey),
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// TopologyLabelVolumeMount returns the volume mount for the topology label volume.
+func TopologyLabelVolumeMount() corev1.VolumeMount {
+	return corev1.VolumeMount{
+		Name:      topologyVolumeName,
+		MountPath: topologyMountPath,
+		ReadOnly:  true,
+	}
+}
+
+// WorkerTopologyEnvVars returns env vars that signal topology awareness to
+// the worker runtime. The topology value is read from the Downward API volume
+// file at /etc/dynamo/topology/{domain}.
+func WorkerTopologyEnvVars(policy *v1beta1.KvTransferPolicy) []corev1.EnvVar {
+	domain := strings.ToLower(string(policy.Domain))
 	return []corev1.EnvVar{
 		{
 			Name:  commonconsts.EnvTopologyEnabled,
 			Value: "true",
 		},
 		{
-			Name: envName,
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: labelFieldPath,
-				},
-			},
+			Name:  commonconsts.EnvTopologyPrefix + "MOUNT_PATH",
+			Value: topologyMountPath,
+		},
+		{
+			Name:  commonconsts.EnvTopologyPrefix + "DOMAIN",
+			Value: domain,
 		},
 	}
 }
