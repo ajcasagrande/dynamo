@@ -214,11 +214,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "deepseek_v4",
         "PARSER.batch.5",
     ): _RECOVERY_CONTRACT,
-    (
-        "vllm",
-        "deepseek_v4",
-        "PARSER.batch.7",
-    ): "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
     # PARSER.batch.4 (malformed) — impl-defined recovery contract.
     ("vllm", "deepseek_v3_1", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("vllm", "minimax_m2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
@@ -239,11 +234,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     ("sglang", "harmony", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     # ----- new families: hermes / qwen25 / mistral / jamba / llama3_json / phi4 / nemotron_nano / deepseek_v3_2 -----
     ("vllm", "deepseek_v3_2", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    (
-        "vllm",
-        "deepseek_v3_2",
-        "PARSER.batch.7",
-    ): "emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
     ("vllm", "hermes", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("vllm", "hermes", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
     ("vllm", "hermes", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
