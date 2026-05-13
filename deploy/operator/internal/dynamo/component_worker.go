@@ -7,7 +7,9 @@ package dynamo
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -123,4 +125,27 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 	}
 
 	return container, nil
+}
+
+// WorkerTopologyEnvVars returns DYN_TOPOLOGY_ENABLED=true and a
+// DYN_TOPOLOGY_{DOMAIN} env var that reads the pod label via Downward API.
+func WorkerTopologyEnvVars(policy *v1beta1.KvTransferPolicy) []corev1.EnvVar {
+	domain := string(policy.Domain)
+	envName := commonconsts.EnvTopologyPrefix + strings.ToUpper(domain)
+	labelFieldPath := fmt.Sprintf("metadata.labels['%s']", policy.LabelKey)
+
+	return []corev1.EnvVar{
+		{
+			Name:  commonconsts.EnvTopologyEnabled,
+			Value: "true",
+		},
+		{
+			Name: envName,
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: labelFieldPath,
+				},
+			},
+		},
+	}
 }

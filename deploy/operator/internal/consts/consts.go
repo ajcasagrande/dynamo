@@ -78,9 +78,15 @@ const (
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
-	// KV transfer policy router env vars
+	// KV transfer policy router env vars (frontend)
 	EnvRouterKvTransferDomain        = "DYN_ROUTER_KV_TRANSFER_DOMAIN"
 	EnvRouterKvTransferNoMatchPolicy = "DYN_ROUTER_KV_TRANSFER_NO_MATCH_POLICY"
+
+	// Topology env vars (worker) — injected when kvTransferPolicy is configured.
+	// DYN_TOPOLOGY_ENABLED signals the runtime to read topology from env vars.
+	// DYN_TOPOLOGY_{DOMAIN} carries the worker's topology value via Downward API.
+	EnvTopologyEnabled = "DYN_TOPOLOGY_ENABLED"
+	EnvTopologyPrefix  = "DYN_TOPOLOGY_"
 
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"

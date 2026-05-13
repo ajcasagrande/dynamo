@@ -1754,15 +1754,17 @@ func applyDGDTemplateDefaults(
 		main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
 	}
 
-	// Inject KV transfer policy env vars into frontend pod templates so they
-	// survive the DGD → DCD materialization. The DCD controller calls
-	// GenerateBasePodSpec without the parent DGD, so the env vars must be
-	// baked into the DCD's pod template at generation time.
-	if dynamoDeployment.Spec.KvTransferPolicy != nil &&
-		component.ComponentType == commonconsts.ComponentTypeFrontend {
+	// Bake KV transfer policy env vars into the pod template so they survive
+	// DGD → DCD materialization (the DCD controller lacks the parent DGD).
+	if dynamoDeployment.Spec.KvTransferPolicy != nil {
 		podTemplate := ensurePodTemplate(component)
 		main := ensureMainContainer(podTemplate)
-		main.Env = MergeEnvs(KvTransferPolicyEnvVars(dynamoDeployment.Spec.KvTransferPolicy), main.Env)
+		switch {
+		case component.ComponentType == commonconsts.ComponentTypeFrontend:
+			main.Env = MergeEnvs(KvTransferPolicyEnvVars(dynamoDeployment.Spec.KvTransferPolicy), main.Env)
+		case IsWorkerComponent(string(component.ComponentType)):
+			main.Env = MergeEnvs(WorkerTopologyEnvVars(dynamoDeployment.Spec.KvTransferPolicy), main.Env)
+		}
 	}
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
