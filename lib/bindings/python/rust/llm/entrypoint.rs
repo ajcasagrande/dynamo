@@ -185,6 +185,8 @@ impl KvRouterConfig {
                 shared_cache_type: shared_cache_type
                     .parse()
                     .unwrap_or_else(|_| panic!("invalid shared_cache_type: {shared_cache_type:?}")),
+                kv_transfer_topology_domain: None,
+                kv_transfer_no_match_policy: Default::default(),
             },
         }
     }
