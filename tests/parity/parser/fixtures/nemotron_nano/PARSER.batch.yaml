@@ -147,8 +147,8 @@ cases:
       calls:
       - name: get_weather
         arguments:
-          unit: fahrenheit
           location: NYC
+          unit: fahrenheit
       normal_text: ''
   PARSER.batch.9:
     description: Empty input

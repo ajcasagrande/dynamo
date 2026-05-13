@@ -221,7 +221,20 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     ): "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
     # PARSER.batch.4 (malformed) — impl-defined recovery contract.
     ("vllm", "deepseek_v3_1", "PARSER.batch.4"): _RECOVERY_CONTRACT,
+    # minimax_m2.batch.4 (vllm): wrapper holds an invoke with missing
+    # `</invoke>`; Dynamo (now strict per MiniMax-M2 spec) returns
+    # calls=[], normal_text=""; vLLM returns calls=[], normal_text=<input>.
+    # MiniMax reference parser is silent on normal_text handling, so the
+    # divergence remains impl-defined.
     ("vllm", "minimax_m2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
+    # minimax_m2.batch.4 (sglang): SGLang's MinimaxM2Detector regex includes a
+    # `|$` end-of-input fallback that lets a missing `</invoke>` still produce a
+    # call, contradicting MiniMax-M2's reference parser. Filed against SGLang.
+    (
+        "sglang",
+        "minimax_m2",
+        "PARSER.batch.4",
+    ): "SGLang's MinimaxM2Detector regex recovers when `</invoke>` is missing; MiniMax-M2 spec requires both fences (Dynamo now strict-match)",
     ("sglang", "kimi_k2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("sglang", "harmony", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     # PARSER.batch.5 (missing end-token recovery) — impl-defined. Dynamo's
@@ -230,11 +243,11 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     # still drop on the missing end-token diverge here.
     # vllm/sglang qwen3_coder.batch.5 both recover to the same call as
     # Dynamo and match the new expected — intentionally NOT registered.
+    # vllm/sglang minimax_m2.batch.5 also match now that Dynamo is
+    # strict-match per the MiniMax-M2 spec (no inner recovery).
     ("vllm", "glm47", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    ("vllm", "minimax_m2", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("vllm", "deepseek_v3_1", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("sglang", "glm47", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    ("sglang", "minimax_m2", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("sglang", "deepseek_v3_1", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("sglang", "harmony", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     # ----- new families: hermes / qwen25 / mistral / jamba / llama3_json / phi4 / nemotron_nano / deepseek_v3_2 -----

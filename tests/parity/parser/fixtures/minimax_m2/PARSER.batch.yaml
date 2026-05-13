@@ -72,10 +72,7 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
+      calls: []
       normal_text: ''
   PARSER.batch.5:
     description: Missing </minimax:tool_call> end marker
@@ -87,11 +84,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      calls: []
+      normal_text: |-
+        <minimax:tool_call>
+        <invoke name="get_weather">
+        <parameter name="location">NYC</parameter>
+        </invoke>
   PARSER.batch.6:
     description: Empty args (no-arg call)
     model_text: |-
@@ -131,8 +129,8 @@ cases:
       calls:
       - name: get_weather
         arguments:
-          location: NYC
           unit: fahrenheit
+          location: NYC
       normal_text: ''
   PARSER.batch.9:
     description: Empty input
