@@ -133,6 +133,41 @@ impl RouterPrefillLoadModel {
     }
 }
 
+/// Policy for handling decode worker selection when no workers share the
+/// prefill worker's topology domain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KvTransferNoMatchPolicy {
+    /// Return an error when no same-domain decode workers exist.
+    #[default]
+    Fail,
+    /// Allow cross-domain transfer if no same-domain decode workers exist (log warning).
+    Fallback,
+}
+
+impl fmt::Display for KvTransferNoMatchPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fail => f.write_str("fail"),
+            Self::Fallback => f.write_str("fallback"),
+        }
+    }
+}
+
+impl FromStr for KvTransferNoMatchPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "fail" => Ok(Self::Fail),
+            "fallback" => Ok(Self::Fallback),
+            _ => Err(format!(
+                "unknown no-match policy: {s:?}, expected 'fail' or 'fallback'"
+            )),
+        }
+    }
+}
+
 impl FromStr for RouterQueuePolicy {
     type Err = String;
 
@@ -271,6 +306,19 @@ pub struct KvRouterConfig {
     /// Type of external shared KV cache to query during routing.
     /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
     pub shared_cache_type: SharedCacheType,
+
+    /// Topology domain to enforce for KV-cache transfers (e.g. "zone", "rack").
+    /// When set, decode worker selection is constrained to workers sharing the
+    /// same topology domain value as the prefill worker.
+    /// Read from env var `DYN_ROUTER_KV_TRANSFER_TOPOLOGY_DOMAIN`.
+    #[serde(default)]
+    pub kv_transfer_topology_domain: Option<String>,
+
+    /// Policy when no decode workers share the prefill worker's topology domain.
+    /// "fail" (default): return an error. "fallback": allow cross-domain transfer.
+    /// Read from env var `DYN_ROUTER_KV_TRANSFER_NO_MATCH_POLICY`.
+    #[serde(default)]
+    pub kv_transfer_no_match_policy: KvTransferNoMatchPolicy,
 }
 
 impl Default for KvRouterConfig {
@@ -299,6 +347,8 @@ impl Default for KvRouterConfig {
             serve_indexer: false,
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
+            kv_transfer_topology_domain: None,
+            kv_transfer_no_match_policy: KvTransferNoMatchPolicy::default(),
         }
     }
 }

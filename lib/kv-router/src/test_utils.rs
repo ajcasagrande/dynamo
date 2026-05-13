@@ -370,6 +370,7 @@ pub struct SimpleWorkerConfig {
     pub data_parallel_size: u32,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    pub topology_domains: std::collections::HashMap<String, String>,
 }
 
 impl Default for SimpleWorkerConfig {
@@ -379,6 +380,7 @@ impl Default for SimpleWorkerConfig {
             data_parallel_size: 1,
             max_num_batched_tokens: None,
             total_kv_blocks: None,
+            topology_domains: std::collections::HashMap::new(),
         }
     }
 }
@@ -398,5 +400,13 @@ impl WorkerConfigLike for SimpleWorkerConfig {
 
     fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    fn topology_domains(&self) -> Option<&std::collections::HashMap<String, String>> {
+        if self.topology_domains.is_empty() {
+            None
+        } else {
+            Some(&self.topology_domains)
+        }
     }
 }

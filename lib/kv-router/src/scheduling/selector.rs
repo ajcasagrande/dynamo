@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rand::Rng;
 use rustc_hash::FxHashMap;
 
-use super::config::KvRouterConfig;
+use super::config::{KvRouterConfig, KvTransferNoMatchPolicy};
 use super::types::{KvSchedulerError, SchedulingRequest, pinned_worker_config};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
@@ -244,6 +244,53 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             });
         }
 
+        // Apply topology filtering when topology_affinity is set on the request
+        // and a topology domain is configured on the router.
+        let topology_allowed_ids: Option<HashSet<WorkerId>> =
+            if let (Some(affinity), Some(domain)) = (
+                &request.topology_affinity,
+                &self.kv_router_config.kv_transfer_topology_domain,
+            ) {
+                let matched: HashSet<WorkerId> = workers
+                    .iter()
+                    .filter(|(worker_id, _)| request.is_worker_allowed(**worker_id))
+                    .filter(|(_, config)| {
+                        config
+                            .topology_domains()
+                            .and_then(|domains| domains.get(domain.as_str()))
+                            .is_some_and(|val| val == affinity)
+                    })
+                    .map(|(worker_id, _)| *worker_id)
+                    .collect();
+
+                if matched.is_empty() {
+                    match self.kv_router_config.kv_transfer_no_match_policy {
+                        KvTransferNoMatchPolicy::Fail => {
+                            return Err(KvSchedulerError::TopologyNoMatch {
+                                domain: domain.clone(),
+                                affinity: affinity.clone(),
+                            });
+                        }
+                        KvTransferNoMatchPolicy::Fallback => {
+                            tracing::warn!(
+                                "No workers in topology domain {domain}={affinity}, \
+                                 falling back to all available workers (policy: fallback)"
+                            );
+                            None // No additional filtering
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "Topology filter: {}/{} workers match {domain}={affinity}",
+                        matched.len(),
+                        workers.len()
+                    );
+                    Some(matched)
+                }
+            } else {
+                None // No topology filtering
+            };
+
         let temperature = request
             .router_config_override
             .as_ref()
@@ -264,6 +311,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         let worker_iter = workers
             .iter()
             .filter(move |(worker_id, _)| request.is_worker_allowed(**worker_id))
+            .filter(move |(worker_id, _)| {
+                topology_allowed_ids
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(worker_id))
+            })
             .flat_map(|(worker_id, config)| {
                 let data_parallel_size = config.data_parallel_size();
                 let data_parallel_start_rank = config.data_parallel_start_rank();
@@ -369,6 +421,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 mod tests {
     use super::*;
     use crate::protocols::SharedCacheHits;
+    use crate::scheduling::types::SchedulingResponse;
+    use crate::test_utils::SimpleWorkerConfig;
 
     #[test]
     fn test_softmax_sample_single_key() {
@@ -490,8 +544,6 @@ mod tests {
     /// Worker 1 has lower logit (less work), so it wins.
     #[test]
     fn test_shared_cache_hits_scoring() {
-        use crate::test_utils::SimpleWorkerConfig;
-
         let block_size = 1u32;
         let isl = 4usize;
         let worker0 = WorkerWithDpRank::from_worker_id(0);
@@ -535,6 +587,7 @@ mod tests {
             pinned_worker: None,
             allowed_worker_ids: None,
             shared_cache_hits: Some(shared_hits),
+            topology_affinity: None,
             resp_tx: Some(tx),
         };
 
@@ -552,8 +605,6 @@ mod tests {
     /// Without shared cache hits, the scoring should be unchanged.
     #[test]
     fn test_no_shared_cache_unchanged() {
-        use crate::test_utils::SimpleWorkerConfig;
-
         let block_size = 16u32;
         let isl = 64usize;
         let worker0 = WorkerWithDpRank::from_worker_id(0);
@@ -585,6 +636,7 @@ mod tests {
             pinned_worker: None,
             allowed_worker_ids: None,
             shared_cache_hits: None,
+            topology_affinity: None,
             resp_tx: Some(tx),
         };
 
@@ -593,5 +645,231 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.worker, worker0);
+    }
+
+    /// Helper to create a SchedulingRequest for topology tests.
+    fn make_topology_request(
+        isl: usize,
+        topology_affinity: Option<String>,
+    ) -> (
+        SchedulingRequest,
+        tokio::sync::oneshot::Receiver<Result<SchedulingResponse, KvSchedulerError>>,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = SchedulingRequest {
+            maybe_request_id: Some("topo-test".into()),
+            token_seq: None,
+            isl_tokens: isl,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::new(),
+            effective_cached_tokens: HashMap::new(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            shared_cache_hits: None,
+            topology_affinity,
+            resp_tx: Some(tx),
+        };
+        (req, rx)
+    }
+
+    fn make_worker_with_topology(domains: Vec<(&str, &str)>) -> SimpleWorkerConfig {
+        let mut config = SimpleWorkerConfig::default();
+        for (k, v) in domains {
+            config.topology_domains.insert(k.to_string(), v.to_string());
+        }
+        config
+    }
+
+    #[test]
+    fn test_topology_filter_selects_matching_workers() {
+        let block_size = 16u32;
+        let isl = 64;
+
+        let config = KvRouterConfig {
+            kv_transfer_topology_domain: Some("zone".to_string()),
+            kv_transfer_no_match_policy: super::super::config::KvTransferNoMatchPolicy::Fail,
+            router_temperature: 0.0,
+            ..Default::default()
+        };
+        let selector = DefaultWorkerSelector::new(Some(config), "decode");
+
+        let mut workers = HashMap::new();
+        workers.insert(1, make_worker_with_topology(vec![("zone", "us-east-1a")]));
+        workers.insert(2, make_worker_with_topology(vec![("zone", "us-west-2b")]));
+        workers.insert(3, make_worker_with_topology(vec![("zone", "us-east-1a")]));
+
+        let (request, _rx) = make_topology_request(isl, Some("us-east-1a".to_string()));
+        let result = selector
+            .select_worker(&workers, &request, block_size)
+            .unwrap();
+
+        // Only workers 1 and 3 are in us-east-1a
+        assert!(
+            result.worker.worker_id == 1 || result.worker.worker_id == 3,
+            "Expected worker 1 or 3, got {}",
+            result.worker.worker_id
+        );
+    }
+
+    #[test]
+    fn test_topology_filter_fail_policy_returns_error() {
+        let block_size = 16u32;
+        let isl = 64;
+
+        let config = KvRouterConfig {
+            kv_transfer_topology_domain: Some("zone".to_string()),
+            kv_transfer_no_match_policy: super::super::config::KvTransferNoMatchPolicy::Fail,
+            ..Default::default()
+        };
+        let selector = DefaultWorkerSelector::new(Some(config), "decode");
+
+        let mut workers = HashMap::new();
+        workers.insert(1, make_worker_with_topology(vec![("zone", "us-east-1a")]));
+        workers.insert(2, make_worker_with_topology(vec![("zone", "us-west-2b")]));
+
+        // Request for zone that no worker has
+        let (request, _rx) = make_topology_request(isl, Some("eu-west-1a".to_string()));
+        let result = selector.select_worker(&workers, &request, block_size);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            KvSchedulerError::TopologyNoMatch { .. }
+        ));
+    }
+
+    #[test]
+    fn test_topology_filter_fallback_policy_uses_all_workers() {
+        let block_size = 16u32;
+        let isl = 64;
+
+        let config = KvRouterConfig {
+            kv_transfer_topology_domain: Some("zone".to_string()),
+            kv_transfer_no_match_policy: super::super::config::KvTransferNoMatchPolicy::Fallback,
+            router_temperature: 0.0,
+            ..Default::default()
+        };
+        let selector = DefaultWorkerSelector::new(Some(config), "decode");
+
+        let mut workers = HashMap::new();
+        workers.insert(1, make_worker_with_topology(vec![("zone", "us-east-1a")]));
+        workers.insert(2, make_worker_with_topology(vec![("zone", "us-west-2b")]));
+
+        // Request for zone that no worker has -> fallback to all
+        let (request, _rx) = make_topology_request(isl, Some("eu-west-1a".to_string()));
+        let result = selector.select_worker(&workers, &request, block_size);
+
+        assert!(result.is_ok(), "Fallback policy should not error");
+        let worker = result.unwrap().worker;
+        assert!(
+            worker.worker_id == 1 || worker.worker_id == 2,
+            "Should select any available worker on fallback"
+        );
+    }
+
+    #[test]
+    fn test_topology_filter_no_affinity_selects_any_worker() {
+        let block_size = 16u32;
+        let isl = 64;
+
+        let config = KvRouterConfig {
+            kv_transfer_topology_domain: Some("zone".to_string()),
+            kv_transfer_no_match_policy: super::super::config::KvTransferNoMatchPolicy::Fail,
+            router_temperature: 0.0,
+            ..Default::default()
+        };
+        let selector = DefaultWorkerSelector::new(Some(config), "decode");
+
+        let mut workers = HashMap::new();
+        workers.insert(1, make_worker_with_topology(vec![("zone", "us-east-1a")]));
+        workers.insert(2, make_worker_with_topology(vec![("zone", "us-west-2b")]));
+
+        // No topology_affinity -> no filtering (backward compat)
+        let (request, _rx) = make_topology_request(isl, None);
+        let result = selector.select_worker(&workers, &request, block_size);
+
+        assert!(result.is_ok(), "No affinity should not filter");
+    }
+
+    #[test]
+    fn test_topology_filter_worker_missing_domain_excluded() {
+        let block_size = 16u32;
+        let isl = 64;
+
+        let config = KvRouterConfig {
+            kv_transfer_topology_domain: Some("zone".to_string()),
+            kv_transfer_no_match_policy: super::super::config::KvTransferNoMatchPolicy::Fail,
+            router_temperature: 0.0,
+            ..Default::default()
+        };
+        let selector = DefaultWorkerSelector::new(Some(config), "decode");
+
+        let mut workers = HashMap::new();
+        workers.insert(1, make_worker_with_topology(vec![("zone", "us-east-1a")]));
+        workers.insert(2, SimpleWorkerConfig::default()); // No topology domains
+        workers.insert(3, make_worker_with_topology(vec![("rack", "rack1")])); // Has topology but not "zone"
+
+        let (request, _rx) = make_topology_request(isl, Some("us-east-1a".to_string()));
+        let result = selector
+            .select_worker(&workers, &request, block_size)
+            .unwrap();
+
+        // Only worker 1 has zone=us-east-1a
+        assert_eq!(result.worker.worker_id, 1);
+    }
+
+    #[test]
+    fn test_topology_filter_no_domain_configured_ignores_affinity() {
+        let block_size = 16u32;
+        let isl = 64;
+
+        // No kv_transfer_topology_domain configured
+        let config = KvRouterConfig::default();
+        let selector = DefaultWorkerSelector::new(Some(config), "decode");
+
+        let mut workers = HashMap::new();
+        workers.insert(1, make_worker_with_topology(vec![("zone", "us-east-1a")]));
+        workers.insert(2, make_worker_with_topology(vec![("zone", "us-west-2b")]));
+
+        // Even with affinity set, no domain configured -> no filtering
+        let (request, _rx) = make_topology_request(isl, Some("us-east-1a".to_string()));
+        let result = selector.select_worker(&workers, &request, block_size);
+
+        assert!(result.is_ok(), "No domain configured should not filter");
+    }
+
+    #[test]
+    fn test_topology_filter_mixed_workers() {
+        let block_size = 16u32;
+        let isl = 64;
+
+        let config = KvRouterConfig {
+            kv_transfer_topology_domain: Some("zone".to_string()),
+            kv_transfer_no_match_policy: super::super::config::KvTransferNoMatchPolicy::Fail,
+            router_temperature: 0.0,
+            ..Default::default()
+        };
+        let selector = DefaultWorkerSelector::new(Some(config), "decode");
+
+        let mut workers = HashMap::new();
+        workers.insert(1, make_worker_with_topology(vec![("zone", "us-east-1a")]));
+        workers.insert(2, make_worker_with_topology(vec![("zone", "us-west-2b")]));
+        workers.insert(3, SimpleWorkerConfig::default()); // No topology
+
+        let (request, _rx) = make_topology_request(isl, Some("us-east-1a".to_string()));
+        let result = selector
+            .select_worker(&workers, &request, block_size)
+            .unwrap();
+
+        // Only worker 1 matches zone=us-east-1a
+        assert_eq!(result.worker.worker_id, 1);
     }
 }
