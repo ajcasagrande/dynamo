@@ -508,6 +508,7 @@ class ModelRuntimeConfig:
     enable_local_indexer: bool
     enable_eagle: bool
     runtime_data: dict[str, Any]
+    topology_domains: dict[str, str]
     tensor_model_config: Any | None
     bootstrap_host: str | None
     bootstrap_port: int | None

@@ -182,4 +182,24 @@ impl ModelRuntimeConfig {
     fn enable_eagle(&self) -> bool {
         self.inner.enable_eagle
     }
+
+    #[getter]
+    fn topology_domains(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        for (key, value) in &self.inner.topology_domains {
+            dict.set_item(key, value)?;
+        }
+        Ok(dict.into())
+    }
+
+    #[setter]
+    fn set_topology_domains(&mut self, topology_domains: &Bound<'_, PyDict>) -> PyResult<()> {
+        self.inner.topology_domains.clear();
+        for (key, value) in topology_domains.iter() {
+            let key_str: String = key.extract()?;
+            let value_str: String = value.extract()?;
+            self.inner.topology_domains.insert(key_str, value_str);
+        }
+        Ok(())
+    }
 }

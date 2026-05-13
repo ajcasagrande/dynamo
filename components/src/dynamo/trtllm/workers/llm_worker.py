@@ -518,6 +518,13 @@ async def init_llm_worker(
         attention_dp_size = engine.get_attention_dp_size()
         runtime_config.data_parallel_size = attention_dp_size
 
+        # Set topology domains for topology-aware KV transfer routing
+        from dynamo.common.utils.topology import read_topology_domains
+
+        topology_domains = read_topology_domains()
+        if topology_domains:
+            runtime_config.topology_domains = topology_domains
+
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
             f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"

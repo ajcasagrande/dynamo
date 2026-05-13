@@ -282,6 +282,13 @@ async def _get_runtime_config(
     if dp_size > 1:
         logging.info(f"Registering with data_parallel_size={dp_size}")
 
+    # Set topology domains for topology-aware KV transfer routing
+    from dynamo.common.utils.topology import read_topology_domains
+
+    topology_domains = read_topology_domains()
+    if topology_domains:
+        runtime_config.topology_domains = topology_domains
+
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
     bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
     if bootstrap_host and bootstrap_port:
