@@ -5,6 +5,7 @@ mod demux;
 mod entrypoints;
 mod live_runtime;
 mod router;
+mod sim_sink;
 mod state;
 mod task;
 

@@ -12,12 +12,13 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::protocols::{DirectRequest, FpmPublisher, MockEngineArgs, OutputSignal};
-use crate::loadgen::WorkloadDriver;
+use crate::loadgen::{DispatchRequest, RequestSink, WorkloadDriver};
 use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode, TraceSimulationReport};
 use crate::scheduler::{AdmissionEvent, EngineScheduler, SchedulerHandle};
 
 use super::ReplayRouter;
 use super::demux::run_demux;
+use super::sim_sink::{NoopObserver, SimSink};
 use super::state::{
     LiveReplayMode, LiveRuntimeStats, SharedLiveRuntimeStats, WorkloadDispatchState, now_ms,
     record_arrival,
@@ -145,7 +146,16 @@ impl LiveRuntime {
                     let task_ctx = task_ctx.clone();
                     tasks.spawn(async move {
                         let _permit = permit;
-                        run_request_task(task_ctx, request, None).await
+                        let dreq = DispatchRequest {
+                            uuid: request.uuid.unwrap_or_default(),
+                            input_length: request.tokens.len(),
+                            max_output_tokens: request.max_output_tokens,
+                            prompt_text: None,
+                            sim_request: Some(request),
+                        };
+                        SimSink { ctx: task_ctx }
+                            .dispatch(dreq, &NoopObserver)
+                            .await
                     });
                 }
             }

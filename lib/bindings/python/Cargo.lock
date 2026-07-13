@@ -2288,6 +2288,7 @@ version = "1.3.0"
 dependencies = [
  "aiconfigurator-core",
  "anyhow",
+ "async-trait",
  "bytes",
  "dashmap",
  "derive-getters",
@@ -2304,6 +2305,7 @@ dependencies = [
  "ndarray 0.16.1",
  "ndarray-interp",
  "ndarray-npy",
+ "pyo3",
  "rand 0.9.4",
  "rmp-serde",
  "rustc-hash 2.1.2",

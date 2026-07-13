@@ -24,7 +24,7 @@ use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::kv_manager::kvbm_backend::{G1Acquire, OffloadDependency, VllmDestinationReservation};
 #[cfg(feature = "kvbm-offload")]
 use crate::kvbm_offload::coordinator::SwapInTerminal;
-use crate::replay::TraceCollector;
+use crate::replay::PassSink;
 use crate::scheduler::vllm::policy::{self, AdmissionDecision};
 use crate::scheduler::{
     ActiveHandoffRequests, AdmissionEvent, AdmissionInvariant, AdmissionStage,
@@ -568,6 +568,16 @@ impl VllmCore {
                     SchedulerCommandResult::Submitted(self.submit(request)?),
                 ))
             }
+            SchedulerCommand::CancelRequest { request_id } => {
+                let before = self.num_requests();
+                self.drop_request(request_id);
+                let result = if self.num_requests() < before {
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                Ok(self.effects_after_capacity_change(result, None))
+            }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
                 mut request,
@@ -1029,7 +1039,7 @@ impl VllmCore {
 
     pub(crate) fn execute_pass(
         &mut self,
-        collector: &mut TraceCollector,
+        collector: &mut dyn PassSink,
         now_ms: f64,
     ) -> EnginePassResult {
         self.execute_pass_internal(Some(collector), now_ms, None)
@@ -1303,7 +1313,7 @@ impl VllmCore {
     #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn execute_pass_internal(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
+        mut collector: Option<&mut dyn PassSink>,
         now_ms: f64,
         admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> EnginePassResult {
@@ -1900,7 +1910,7 @@ impl VllmCore {
     #[cfg_attr(feature = "profile", inline(never))]
     fn emit_ready_tokens(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
+        mut collector: Option<&mut dyn PassSink>,
         decode_start_ms: f64,
     ) -> (Duration, Vec<OutputSignal>) {
         let mut ready = Vec::with_capacity(self.state.running.len());
@@ -2070,7 +2080,7 @@ impl VllmCore {
     fn emit_speculative_ready_tokens(
         &mut self,
         mut ready: Vec<Uuid>,
-        collector: Option<&mut TraceCollector>,
+        collector: Option<&mut dyn PassSink>,
         decode_start_ms: f64,
     ) -> (Duration, Vec<OutputSignal>) {
         let max_burst = if self.args.worker_type == WorkerType::Prefill {

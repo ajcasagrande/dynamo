@@ -907,6 +907,7 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
+    let normalize_offline_report = replay_mode == "offline";
     if report_jsonl_path.is_some() && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "report_jsonl_path is only supported for replay_mode='offline'",
@@ -948,6 +949,37 @@ pub fn run_mocker_trace_replay(
     };
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        if replay_mode == "offline" {
+            let engines = match args_selection {
+                ReplayArgsSelection::Aggregated(args) => {
+                    dynamo_mocker::replay::OfflineTraceReplayEngines::Aggregated {
+                        args: *args,
+                        num_workers,
+                    }
+                }
+                ReplayArgsSelection::Disagg(config) => {
+                    dynamo_mocker::replay::OfflineTraceReplayEngines::Disaggregated(*config)
+                }
+            };
+            return dynamo_mocker::replay::simulate_offline_trace_files(
+                dynamo_mocker::replay::OfflineTraceReplayConfig {
+                    engines,
+                    router_config,
+                    prefill_load_estimator,
+                    trace_files,
+                    trace_block_size,
+                    replay_concurrency,
+                    router_mode,
+                    arrival_speedup_ratio,
+                    trace_format,
+                    trace_shared_prefix_ratio,
+                    trace_num_prefix_groups,
+                    record_per_request,
+                    max_sim_time_ms,
+                    sla,
+                },
+            );
+        }
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::Dynamo {
             let trace = DynamoRequestTrace::from_request_trace_files(
                 &trace_files,
@@ -1082,7 +1114,10 @@ pub fn run_mocker_trace_replay(
             }
         }
     });
-    let report = report.map_err(to_pyerr)?;
+    let mut report = report.map_err(to_pyerr)?;
+    if normalize_offline_report {
+        canonicalize_offline_frontend_report(&mut report);
+    }
     // Write per-request JSONL from Rust directly if requested, avoiding a
     // potentially-large round trip through pyo3 / pythonize. Each line is one
     // JSON object (matching AIPerf's profile_export.jsonl convention).
@@ -1093,6 +1128,68 @@ pub fn run_mocker_trace_replay(
     pythonize(py, &report)
         .map_err(to_pyerr)
         .map(|obj| obj.unbind())
+}
+
+const OFFLINE_REPORT_DECIMAL_SCALE: f64 = 1_000_000.0;
+
+fn canonicalize_offline_float(value: &mut f64) {
+    if !value.is_finite() {
+        return;
+    }
+    let scaled = *value * OFFLINE_REPORT_DECIMAL_SCALE;
+    if scaled.is_finite() {
+        *value = scaled.round() / OFFLINE_REPORT_DECIMAL_SCALE;
+    }
+    // Normalize -0.0 to 0.0 so the two serialize byte-identically.
+    if *value == 0.0 {
+        *value = 0.0;
+    }
+}
+
+fn canonicalize_offline_distribution(
+    distribution: &mut dynamo_mocker::replay::TraceDistributionStats,
+) {
+    canonicalize_offline_float(&mut distribution.mean_ms);
+    canonicalize_offline_float(&mut distribution.min_ms);
+    canonicalize_offline_float(&mut distribution.max_ms);
+    canonicalize_offline_float(&mut distribution.median_ms);
+    canonicalize_offline_float(&mut distribution.p75_ms);
+    canonicalize_offline_float(&mut distribution.p90_ms);
+    canonicalize_offline_float(&mut distribution.p95_ms);
+    canonicalize_offline_float(&mut distribution.p99_ms);
+    canonicalize_offline_float(&mut distribution.std_ms);
+}
+
+// This is intentionally a binding/report adapter, not mocker behavior. The
+// engine, scheduler, router, cache, event ordering, and collector remain the
+// immutable reference implementation used by every frontend.
+fn canonicalize_offline_frontend_report(report: &mut dynamo_mocker::replay::TraceSimulationReport) {
+    // Offline replay has no wall clock: pin reported wall time to the simulated
+    // duration so the two fields agree across runs. This is a deliberate
+    // field-level override, not float canonicalization.
+    report.throughput.wall_time_ms = report.throughput.duration_ms;
+    canonicalize_offline_float(&mut report.throughput.duration_ms);
+    canonicalize_offline_float(&mut report.throughput.wall_time_ms);
+    canonicalize_offline_float(&mut report.throughput.request_throughput_rps);
+    canonicalize_offline_float(&mut report.throughput.input_throughput_tok_s);
+    canonicalize_offline_float(&mut report.throughput.output_throughput_tok_s);
+    canonicalize_offline_float(&mut report.throughput.total_throughput_tok_s);
+    canonicalize_offline_float(&mut report.throughput.prefill_worker_seconds);
+    canonicalize_offline_float(&mut report.throughput.decode_worker_seconds);
+    canonicalize_offline_float(&mut report.throughput.gpu_hours);
+    canonicalize_offline_float(&mut report.prefix_cache_reused_ratio);
+    canonicalize_offline_float(&mut report.first_admission_prefix_cache_reused_ratio);
+    canonicalize_offline_distribution(&mut report.latency.ttft);
+    canonicalize_offline_distribution(&mut report.latency.ttst);
+    canonicalize_offline_distribution(&mut report.latency.tpot);
+    canonicalize_offline_distribution(&mut report.latency.itl.distribution);
+    canonicalize_offline_float(&mut report.latency.itl.max_ms);
+    canonicalize_offline_distribution(&mut report.latency.e2e);
+    canonicalize_offline_distribution(&mut report.latency.output_token_throughput_per_user);
+    if let Some(goodput) = &mut report.goodput {
+        canonicalize_offline_float(&mut goodput.request_throughput_rps);
+        canonicalize_offline_float(&mut goodput.output_throughput_tok_s);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1576,7 +1673,19 @@ fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_disagg_replay_mode;
+    use super::{canonicalize_offline_float, validate_disagg_replay_mode};
+
+    #[test]
+    fn offline_report_boundary_removes_sub_nanosecond_reduction_noise() {
+        let mut left = 172.434_425_795_01;
+        let mut right = 172.434_425_795_49;
+
+        canonicalize_offline_float(&mut left);
+        canonicalize_offline_float(&mut right);
+
+        assert_eq!(left, right);
+        assert_eq!(left, 172.434_426);
+    }
 
     #[test]
     fn online_disaggregation_is_rejected_with_stable_message() {

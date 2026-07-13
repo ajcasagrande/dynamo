@@ -4,4 +4,5 @@
 //! Runtime services used by the mocker.
 
 pub mod bootstrap;
+#[cfg(feature = "zmq-events")]
 pub mod zmq_events;

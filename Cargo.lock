@@ -2661,6 +2661,7 @@ version = "1.3.0"
 dependencies = [
  "aiconfigurator-core",
  "anyhow",
+ "async-trait",
  "bytes",
  "dashmap",
  "derive-getters",

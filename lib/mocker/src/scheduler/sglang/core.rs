@@ -13,7 +13,7 @@ use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional
 use crate::common::utils::prefill_handoff_transfer_timing;
 use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::SglangDestinationReservation;
-use crate::replay::TraceCollector;
+use crate::replay::PassSink;
 
 use super::config::SglangConfig;
 use super::decode::{
@@ -181,6 +181,14 @@ impl SglangCore {
                 Ok(SchedulerCommandEffects::new(
                     SchedulerCommandResult::Submitted(self.submit(request)?),
                 ))
+            }
+            SchedulerCommand::CancelRequest { request_id } => {
+                let result = if self.cancel_active_request(request_id) {
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                Ok(self.effects_after_capacity_change(result))
             }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
@@ -552,7 +560,7 @@ impl SglangCore {
 
     pub(crate) fn execute_pass(
         &mut self,
-        collector: &mut TraceCollector,
+        collector: &mut dyn PassSink,
         now_ms: f64,
     ) -> EnginePassResult {
         self.execute_pass_internal(Some(collector), now_ms)
@@ -564,7 +572,7 @@ impl SglangCore {
 
     pub(super) fn execute_pass_internal(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
+        mut collector: Option<&mut dyn PassSink>,
         now_ms: f64,
     ) -> EnginePassResult {
         let mut admissions = self.promote_prebuilt_ready();

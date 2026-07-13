@@ -15,21 +15,11 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
+    from dynamo.common.forward_pass_metrics import ForwardPassMetrics
+    from dynamo.llm import KvRouterConfig
     from dynamo.planner.core.types import EngineCapabilities
 
-from dynamo._internal.aic import (
-    DEFAULT_GPU_MEMORY_UTILIZATION,
-    DEFAULT_MEM_FRACTION_STATIC,
-    _normalize_aic_quant_mode,
-    estimate_num_gpu_blocks,
-)
-from dynamo.common.forward_pass_metrics import (
-    ForwardPassMetrics,
-    ScheduledRequestMetrics,
-)
-from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
-from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -47,9 +37,14 @@ def _load_router_config(
     router_config_json: str | None,
     router_policy_config: str | None,
 ):
+    if router_config_json is None and router_policy_config is None:
+        return None
+
+    from dynamo.llm import KvRouterConfig as config_type
+
     if router_policy_config is None:
         return (
-            KvRouterConfig.from_json(router_config_json)
+            config_type.from_json(router_config_json)
             if router_config_json is not None
             else None
         )
@@ -58,7 +53,7 @@ def _load_router_config(
     if not isinstance(values, dict):
         raise ValueError("--router-config must contain a JSON object")
     values["router_policy_config"] = router_policy_config
-    return KvRouterConfig.from_json(json.dumps(values))
+    return config_type.from_json(json.dumps(values))
 
 
 _DEFAULT_SGLANG_BLOCK_SIZE = 1
@@ -104,6 +99,8 @@ def _aic_quant_mode(raw: dict, name: str) -> str | None:
     value = raw.get(name)
     if value is not None and not isinstance(value, str):
         raise ValueError(f"{name} must be a string when set")
+    from dynamo._internal.aic import _normalize_aic_quant_mode
+
     return _normalize_aic_quant_mode(value)
 
 
@@ -120,6 +117,12 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
         raise ValueError(
             "AIC KV cache capacity estimation requires aic_model_path in engine args"
         )
+
+    from dynamo._internal.aic import (
+        DEFAULT_GPU_MEMORY_UTILIZATION,
+        DEFAULT_MEM_FRACTION_STATIC,
+        estimate_num_gpu_blocks,
+    )
 
     tp_size = raw.get("aic_tp_size")
     max_num_batched_tokens = raw.get("max_num_batched_tokens")
@@ -191,6 +194,8 @@ def _resolve_kv_bytes_per_token(raw: dict) -> None:
     if not model_path:
         return
 
+    from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
+
     kv_cache_dtype = _aic_quant_mode(raw, "aic_kv_cache_dtype") or "auto"
     kv_bytes_per_token = compute_kv_bytes_per_token(model_path, kv_cache_dtype)
     if kv_bytes_per_token is not None:
@@ -235,6 +240,29 @@ def _load_engine_args(raw_args: str | None):
 
 
 def _load_aic_perf_config(args: argparse.Namespace):
+    raw_values = (
+        args.aic_backend,
+        args.aic_system,
+        args.aic_model_path,
+        args.aic_backend_version,
+        args.aic_tp_size,
+        args.aic_moe_tp_size,
+        args.aic_moe_ep_size,
+        args.aic_attention_dp_size,
+        args.aic_gemm_dtype,
+        args.aic_moe_dtype,
+        args.aic_fmha_dtype,
+        args.aic_kv_cache_dtype,
+        args.aic_comm_dtype,
+        args.aic_nextn,
+        args.aic_nextn_accept_rates,
+    )
+    if not any(value is not None for value in raw_values):
+        return None
+
+    from dynamo._internal.aic import _normalize_aic_quant_mode
+    from dynamo.llm import AicPerfConfig as config_type
+
     values = {
         "aic_backend": args.aic_backend,
         "aic_system": args.aic_system,
@@ -267,7 +295,7 @@ def _load_aic_perf_config(args: argparse.Namespace):
         missing_flags = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
         raise ValueError(f"AIC replay modeling requires {missing_flags}")
 
-    return AicPerfConfig(
+    return config_type(
         aic_backend=values["aic_backend"],
         aic_system=values["aic_system"],
         aic_model_path=values["aic_model_path"],
@@ -313,6 +341,11 @@ def _generate_aic_prefill_fpms(
     process more than that, so the regression shouldn't see larger sums.
     For longer ISL, callers use chunked TTFT estimation.
     """
+    from dynamo.common.forward_pass_metrics import (
+        ForwardPassMetrics,
+        ScheduledRequestMetrics,
+    )
+
     prefill_max = engine_args.max_num_batched_tokens or 8192
     prefill_step = max(1, (prefill_max - 100) // granularity)
 
@@ -344,6 +377,11 @@ def _generate_aic_decode_fpms(
     the engine's ``max_num_seqs`` so the regression sees realistic
     concurrency, not an artificial cap at the sweep density.
     """
+    from dynamo.common.forward_pass_metrics import (
+        ForwardPassMetrics,
+        ScheduledRequestMetrics,
+    )
+
     max_kv_tokens = engine_args.num_gpu_blocks * engine_args.block_size
     if max_kv_tokens <= 0:
         max_kv_tokens = 16384 * 16

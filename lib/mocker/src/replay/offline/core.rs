@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::common::protocols::MockEngineArgs;
-use crate::replay::TraceCollector;
-use crate::scheduler::{EngineCore, EnginePassResult, SglangCore, VllmCore};
+use crate::replay::PassSink;
+use crate::scheduler::{
+    EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandResult, SglangCore, VllmCore,
+};
 use dynamo_kv_router::protocols::WorkerId;
 
 pub(crate) struct ReplayWorkerCore {
@@ -66,9 +68,20 @@ impl ReplayWorkerCore {
         self.core.num_requests()
     }
 
+    pub(crate) fn cancel(&mut self, uuid: uuid::Uuid) -> anyhow::Result<bool> {
+        let result = self
+            .core
+            .apply_command(SchedulerCommand::CancelRequest { request_id: uuid })?;
+        match result {
+            SchedulerCommandResult::Applied => Ok(true),
+            SchedulerCommandResult::Noop => Ok(false),
+            other => anyhow::bail!("ordinary request cancellation returned {other:?}"),
+        }
+    }
+
     pub(crate) fn execute_pass(
         &mut self,
-        collector: &mut TraceCollector,
+        collector: &mut dyn PassSink,
         now_ms: f64,
     ) -> EnginePassResult {
         self.core.execute_pass(collector, now_ms)

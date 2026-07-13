@@ -289,7 +289,7 @@ impl EngineCore {
 
     pub(crate) fn execute_pass(
         &mut self,
-        collector: &mut crate::replay::TraceCollector,
+        collector: &mut dyn crate::replay::PassSink,
         now_ms: f64,
     ) -> EnginePassResult {
         match self {
